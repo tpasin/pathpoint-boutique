@@ -1,7 +1,9 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  // @cursor/sdk ships webpack LICENSE.txt side-effects that Turbopack rejects;
+  // keep it external so Node loads the package at runtime.
+  serverExternalPackages: ["@cursor/sdk"],
 };
 
 export default nextConfig;

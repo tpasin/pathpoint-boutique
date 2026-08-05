@@ -3,25 +3,29 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev --turbopack",
+    "dev": "next dev --turbopack --port 3000",
     "build": "next build --turbopack",
-    "start": "next start",
-    "lint": "eslint"
+    "start": "next start --port 3000",
+    "lint": "eslint",
+    "share": "npx localtunnel --port 3000",
+    "deploy:aws": "bash deploy/aws/launch-ec2.sh",
+    "redeploy:aws": "bash deploy/aws/redeploy.sh"
   },
   "dependencies": {
+    "@cursor/sdk": "^1.0.26",
+    "next": "15.5.22",
     "react": "19.1.0",
-    "react-dom": "19.1.0",
-    "next": "15.5.22"
+    "react-dom": "19.1.0"
   },
   "devDependencies": {
-    "typescript": "^5",
+    "@eslint/eslintrc": "^3",
+    "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
-    "@tailwindcss/postcss": "^4",
-    "tailwindcss": "^4",
     "eslint": "^9",
     "eslint-config-next": "15.5.22",
-    "@eslint/eslintrc": "^3"
+    "tailwindcss": "^4",
+    "typescript": "^5"
   }
 }

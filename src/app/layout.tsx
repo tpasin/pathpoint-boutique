@@ -14,7 +14,8 @@ const body = Manrope({
 
 export const metadata: Metadata = {
   title: "Pathpoint · Online Boutique",
-  description: "Coralogix-powered purchase journey traffic lights for astronomy-demo",
+  description:
+    "Coralogix-powered purchase journey traffic lights for astronomy-demo",
 };
 
 export default function RootLayout({

@@ -33,6 +33,10 @@ yarn-error.log*
 # env files (can opt-in for committing if needed)
 .env*
 
+# AWS deploy secrets / instance metadata
+deploy/aws/.secrets/
+deploy/aws/.last-*
+
 # vercel
 .vercel
 
