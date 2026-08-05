@@ -3,16 +3,15 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev --turbopack --port 3000",
     "build": "next build --turbopack",
     "start": "next start --port 3000",
     "lint": "eslint",
-    "share": "npx localtunnel --port 3000",
     "deploy:aws": "bash deploy/aws/launch-ec2.sh",
     "redeploy:aws": "bash deploy/aws/redeploy.sh"
   },
   "dependencies": {
     "@cursor/sdk": "^1.0.26",
+    "mermaid": "^11.16.1",
     "next": "15.5.22",
     "react": "19.1.0",
     "react-dom": "19.1.0"

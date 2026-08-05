@@ -643,6 +643,13 @@ export default function PathpointDashboard() {
           </p>
         </div>
         <div className="counts">
+          <a
+            className="docs-link"
+            href="/architecture"
+            title="Architecture, traffic lights, and data flows"
+          >
+            Architecture
+          </a>
           <span>
             <StatusDot light="red" /> {critical} critical
           </span>
