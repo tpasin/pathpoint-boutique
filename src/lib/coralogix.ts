@@ -129,14 +129,13 @@ function cxAuthArgs(): string[] {
   const cxProfile = process.env["CX_PROFILE"];
   const cxApiKey = process.env["CX_API_KEY"];
   const cxRegion = process.env["CX_REGION"];
-  // Prefer API key on servers — a laptop CX_PROFILE in .env.local must not
-  // override EnvironmentFile credentials (missing profile → empty traces/RUM).
+  // Prefer named CLI profile (Thiago / Pomelo) when set — matches local `cx -p`.
+  if (cxProfile) return ["--profile", cxProfile];
   if (cxApiKey) {
     const args = ["--api-key", cxApiKey];
     if (cxRegion) args.push("--region", cxRegion);
     return args;
   }
-  if (cxProfile) return ["--profile", cxProfile];
   return [];
 }
 
@@ -388,66 +387,142 @@ export async function askOlly(opts: {
 /** Run a PromQL instant query via `cx metrics query`. */
 export async function queryPromql(
   expr: string,
-  opts: { time?: string } = {}
+  opts: { time?: string; priority?: boolean } = {}
 ): Promise<number | null> {
+  const series = await queryPromqlSeries(expr, opts);
+  return series[0]?.value ?? null;
+}
+
+export type PromqlSample = {
+  metric: Record<string, string>;
+  value: number;
+};
+
+/** Instant PromQL → all series (first sample each). */
+export async function queryPromqlSeries(
+  expr: string,
+  opts: { time?: string; priority?: boolean } = {}
+): Promise<PromqlSample[]> {
+  if (!hasCxCreds()) return [];
+
+  const args = ["metrics", "query", expr];
+  if (opts.time) args.push("--time", toIso(opts.time));
+
+  const parsed = await runCxJson(args, {
+    timeoutMs: 30_000,
+    priority: opts.priority ?? true,
+  });
+  if (!Array.isArray(parsed)) return [];
+
+  const out: PromqlSample[] = [];
+  for (const row of parsed) {
+    if (!row || typeof row !== "object") continue;
+    const r = row as {
+      metric?: Record<string, string>;
+      value?: unknown[];
+      values?: unknown[][];
+    };
+    const raw = r.value?.[1] ?? r.values?.[0]?.[1];
+    if (raw == null || raw === "") continue;
+    const n = Number(raw);
+    if (!Number.isFinite(n)) continue;
+    out.push({ metric: r.metric || {}, value: n });
+  }
+  return out;
+}
+
+/** Range PromQL → flattened numeric points (first series). */
+export async function queryPromqlRange(
+  expr: string,
+  opts: { start?: string; end?: string; step?: string; priority?: boolean } = {}
+): Promise<number[]> {
+  if (!hasCxCreds()) return [];
+
+  const args = [
+    "metrics",
+    "query-range",
+    expr,
+    "--start",
+    opts.start || "now-30m",
+    "--end",
+    opts.end || "now",
+    "--step",
+    opts.step || "1m",
+  ];
+
+  const parsed = await runCxJson(args, {
+    timeoutMs: 45_000,
+    priority: opts.priority ?? true,
+  });
+  if (!Array.isArray(parsed) || !parsed[0] || typeof parsed[0] !== "object") return [];
+  const values = (parsed[0] as { values?: unknown[][] }).values;
+  if (!Array.isArray(values)) return [];
+  const points: number[] = [];
+  for (const pair of values) {
+    const raw = pair?.[1];
+    if (raw == null || raw === "" || raw === "NaN") continue;
+    const n = Number(raw);
+    if (Number.isFinite(n)) points.push(n);
+  }
+  return points;
+}
+
+/**
+ * Run an arbitrary `cx` subcommand and parse the first JSON value from stdout.
+ * Used by Infra / Kubernetes lookups (`cx infra resources …`).
+ */
+export async function runCxJson(
+  commandArgs: string[],
+  opts: { timeoutMs?: number; priority?: boolean } = {}
+): Promise<unknown | null> {
   if (!hasCxCreds()) return null;
 
   const cxBin = process.env["CX_BIN"] || "cx";
-  const args = [...cxAuthArgs(), "-o", "json", "metrics", "query", expr];
-  if (opts.time) {
-    args.push("--time", toIso(opts.time));
-  }
+  const args = [...cxAuthArgs(), "-o", "json", ...commandArgs];
 
   return enqueueCx(async () => {
     try {
       const { stdout, stderr } = await execFileAsync(cxBin, args, {
-        maxBuffer: 5 * 1024 * 1024,
+        maxBuffer: 20 * 1024 * 1024,
         env: { ...process.env },
-        timeout: 30_000,
+        timeout: opts.timeoutMs ?? 45_000,
       });
-      const trimmed = stdout.trim();
-      const combined = `${stdout}\n${stderr}`;
-      if (/error from profile|API request failed/i.test(combined) && !trimmed.includes("[")) {
-        return null;
+      // Prefer stdout alone — cx often prints progress on stderr ("Fetching…"),
+      // and concatenating that breaks JSON.parse.
+      const candidates = [stdout, `${stdout}\n${stderr}`];
+      for (const raw of candidates) {
+        const trimmed = raw.trim();
+        if (!trimmed) continue;
+        const arr = trimmed.indexOf("[");
+        const obj = trimmed.indexOf("{");
+        let payload = "";
+        if (arr >= 0 && (obj < 0 || arr <= obj)) {
+          const end = trimmed.lastIndexOf("]");
+          payload = end >= arr ? trimmed.slice(arr, end + 1) : trimmed.slice(arr);
+        } else if (obj >= 0) {
+          const end = trimmed.lastIndexOf("}");
+          payload = end >= obj ? trimmed.slice(obj, end + 1) : trimmed.slice(obj);
+        }
+        if (!payload) continue;
+        try {
+          return JSON.parse(payload);
+        } catch {
+          /* try next candidate */
+        }
       }
-      const jsonStart = trimmed.indexOf("[");
-      if (jsonStart < 0) return null;
-      const parsed = JSON.parse(trimmed.slice(jsonStart));
-      const rows = Array.isArray(parsed) ? parsed : [];
-      const first = rows[0];
-      const raw = first?.value?.[1] ?? first?.values?.[0]?.[1];
-      if (raw == null || raw === "") return null;
-      const n = Number(raw);
-      return Number.isFinite(n) ? n : null;
+      return null;
     } catch {
       return null;
     }
-  }, true);
+  }, opts.priority === true);
 }
 
 /** List SLO summaries via `cx slos list`. */
 export async function listSlosRaw(): Promise<Record<string, unknown>[]> {
   if (!hasCxCreds()) return [];
 
-  const cxBin = process.env["CX_BIN"] || "cx";
-  const args = [...cxAuthArgs(), "-o", "json", "slos", "list"];
-
-  return enqueueCx(async () => {
-    try {
-      const { stdout } = await execFileAsync(cxBin, args, {
-        maxBuffer: 10 * 1024 * 1024,
-        env: { ...process.env },
-        timeout: 45_000,
-      });
-      const trimmed = stdout.trim();
-      const jsonStart = trimmed.indexOf("[");
-      if (jsonStart < 0) return [];
-      const parsed = JSON.parse(trimmed.slice(jsonStart));
-      return Array.isArray(parsed) ? parsed : [];
-    } catch {
-      return [];
-    }
-  });
+  const parsed = await runCxJson(["slos", "list"]);
+  return Array.isArray(parsed) ? parsed : [];
 }
 
 /** Get a full SLO definition via `cx slos get`. */
@@ -515,6 +590,7 @@ export function sessionReplayUrl(
 
 /** Deep-link into Coralogix Explore for logs/spans with a time range (DataPrime).
  * Always targets Default / spans|logs (All Traces / All Logs), never Frequent Search.
+ * Span-metric lights drill into matching spans (spansView=spans by default).
  */
 export function exploreUrl(opts: {
   kind: "logs" | "tracing";
@@ -522,6 +598,7 @@ export function exploreUrl(opts: {
   start: string;
   end: string;
   traceId?: string;
+  spansView?: "spans" | "traces";
 }): string {
   const base = coralogixUiBase().replace(/\/$/, "");
   const from = new Date(opts.start).getTime();
@@ -544,10 +621,17 @@ export function exploreUrl(opts: {
   let query = opts.query || "";
   if (opts.kind === "tracing") {
     query = query.replace(/\bsource\s+frequentsearch\/spans\b/gi, "source spans");
+    if (query && !/^\s*source\s+/i.test(query)) {
+      query = `source spans | ${query}`;
+    }
   } else {
     query = query.replace(/\bsource\s+frequentsearch\/logs\b/gi, "source logs");
+    if (query && !/^\s*source\s+/i.test(query)) {
+      query = `source logs | ${query}`;
+    }
   }
 
+  const spansView = opts.spansView || (opts.kind === "tracing" ? "spans" : "traces");
   const params = new URLSearchParams({
     queryType: "dataprime",
     dataset,
@@ -555,8 +639,8 @@ export function exploreUrl(opts: {
     to: String(to),
   });
   if (opts.kind === "tracing") {
-    params.set("page", "traces");
-    params.set("spansView", "traces");
+    params.set("page", spansView === "traces" ? "traces" : "spans");
+    params.set("spansView", spansView);
   }
   if (query) {
     params.set("query", query);

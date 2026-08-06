@@ -15,6 +15,76 @@ import {
   type SourceRef,
 } from "@/lib/github-source";
 
+type InfraLink = { name: string; url: string; resourceId?: string };
+type K8sUsage = {
+  cpu: string;
+  cpuRequest: string;
+  memory: string;
+  memoryRequest: string;
+  memoryTrend: { points: number[]; changePct: number | null; label: string };
+  containers: { name: string; ready: boolean; restarts?: number }[];
+  containerCount: number;
+};
+type K8sSnapshot = {
+  cluster: InfraLink;
+  namespace: InfraLink;
+  deployments: InfraLink[];
+  nodes: InfraLink[];
+  pods: (InfraLink & { deployment: string; node?: string })[];
+  usage?: K8sUsage;
+  selection: {
+    stage?: string;
+    step?: string;
+    deployments: string[];
+    label: string;
+  };
+};
+
+function stageFromBizId(id: string): string | undefined {
+  if (id.includes("checkout")) return "checkout";
+  if (id.includes("payment") || id.includes("charge")) return "payment";
+  if (id.includes("cart") || id.includes("redis")) return "cart";
+  if (id.includes("fulfill") || id.includes("ship") || id.includes("email"))
+    return "fulfill";
+  if (id.includes("catalog") || id.includes("browse") || id.includes("product"))
+    return "browse";
+  return undefined;
+}
+
+function MemorySparkline({ points }: { points: number[] }) {
+  if (!points.length) {
+    return <span className="muted">—</span>;
+  }
+  const w = 120;
+  const h = 28;
+  const pad = 2;
+  const coords = points
+    .map((p, i) => {
+      const x = pad + (i / Math.max(1, points.length - 1)) * (w - pad * 2);
+      const y = pad + (1 - p) * (h - pad * 2);
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(" ");
+  return (
+    <svg
+      className="k8s-spark"
+      viewBox={`0 0 ${w} ${h}`}
+      width={w}
+      height={h}
+      aria-hidden
+    >
+      <polyline
+        fill="none"
+        stroke="#3fa266"
+        strokeWidth="1.75"
+        strokeLinejoin="round"
+        strokeLinecap="round"
+        points={coords}
+      />
+    </svg>
+  );
+}
+
 function toLocalInputValue(d: Date): string {
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
@@ -110,6 +180,7 @@ type OllyBoxContext = {
   metric?: string;
   light?: Light;
   stageId?: string;
+  stepId?: string;
   exploreKind?: "logs" | "tracing";
   exploreQuery?: string;
   extra?: string;
@@ -184,7 +255,7 @@ function StageChevron({
       className="stage-chevron"
       data-howto={stage.howto || `${stage.metric} ${stage.metricLabel}`}
       onContextMenu={(e) => onContextMenu(e, box)}
-      title="Left-click actions below · Right-click: ask Olly"
+      title="Left-click actions below · Right-click: View Infrastructure / ask Olly"
     >
       <svg viewBox={`0 0 ${w} ${h}`} width="100%" height={h} preserveAspectRatio="none">
         <path d={path} fill="#151515" stroke="#333" strokeWidth={1.5} />
@@ -258,8 +329,12 @@ export default function PathpointDashboard() {
   const [slosError, setSlosError] = useState<string | null>(null);
   const [ctxMenu, setCtxMenu] = useState<CtxMenu | null>(null);
   const [askDialog, setAskDialog] = useState<AskDialog | null>(null);
+  const [k8s, setK8s] = useState<K8sSnapshot | null>(null);
+  const [k8sLoading, setK8sLoading] = useState(false);
+  const [k8sError, setK8sError] = useState<string | null>(null);
   const askInputRef = useRef<HTMLInputElement>(null);
   const ollySectionRef = useRef<HTMLElement>(null);
+  const k8sSectionRef = useRef<HTMLElement>(null);
 
   const rangeIso = useCallback(
     () => ({
@@ -306,6 +381,48 @@ export default function PathpointDashboard() {
       }
     },
     [rangeIso]
+  );
+
+  const loadK8s = useCallback(
+    async (opts: { stage?: string; step?: string; label?: string }) => {
+      setK8sLoading(true);
+      setK8sError(null);
+      try {
+        const qs = new URLSearchParams();
+        if (opts.stage) qs.set("stage", opts.stage);
+        if (opts.step) qs.set("step", opts.step);
+        if (opts.label) qs.set("label", opts.label);
+        const res = await fetch(`/api/k8s?${qs.toString()}`);
+        const json = await res.json();
+        if (!res.ok) throw new Error(json.error || "Failed to load Kubernetes");
+        setK8s(json);
+      } catch (err) {
+        setK8sError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setK8sLoading(false);
+      }
+    },
+    []
+  );
+
+  const selectK8s = useCallback(
+    (opts: { stage?: string; step?: string; label?: string; scroll?: boolean }) => {
+      if (opts.stage) setSelectedStage(opts.stage);
+      void loadK8s(opts);
+      if (opts.scroll) {
+        requestAnimationFrame(() => {
+          const el = k8sSectionRef.current;
+          if (!el) return;
+          el.scrollIntoView({ behavior: "smooth", block: "start" });
+          el.classList.remove("k8s-flash");
+          // re-trigger CSS animation
+          void el.offsetWidth;
+          el.classList.add("k8s-flash");
+          window.setTimeout(() => el.classList.remove("k8s-flash"), 1600);
+        });
+      }
+    },
+    [loadK8s]
   );
 
   useEffect(() => {
@@ -364,6 +481,11 @@ export default function PathpointDashboard() {
   useEffect(() => {
     void loadTraces(selectedStage);
   }, [loadTraces, selectedStage]);
+
+  // Initial Kubernetes context (checkout); box clicks call selectK8s.
+  useEffect(() => {
+    void loadK8s({ stage: "checkout", label: "CHECKOUT" });
+  }, [loadK8s]);
 
   const isErrorTrace = useCallback((t: TraceHit) => {
     const s = (t.status || "").toLowerCase();
@@ -581,12 +703,22 @@ export default function PathpointDashboard() {
     e.preventDefault();
     e.stopPropagation();
     const pad = 8;
-    const menuW = 220;
-    const menuH = 120;
+    const menuW = 240;
+    const menuH = 200;
     const x = Math.min(e.clientX, window.innerWidth - menuW - pad);
     const y = Math.min(e.clientY, window.innerHeight - menuH - pad);
     setAskDialog(null);
     setCtxMenu({ x: Math.max(pad, x), y: Math.max(pad, y), box });
+  }
+
+  function viewInfrastructure(box: OllyBoxContext) {
+    setCtxMenu(null);
+    selectK8s({
+      stage: box.stageId,
+      step: box.stepId,
+      label: box.label,
+      scroll: true,
+    });
   }
 
   function openAskDialog(box: OllyBoxContext, preset?: string) {
@@ -619,7 +751,18 @@ export default function PathpointDashboard() {
 
   function openExplore(kind: "logs" | "tracing", query: string) {
     const { start, end } = rangeIso();
-    window.open(exploreUrl({ kind, query, start, end }), "_blank", "noopener,noreferrer");
+    // Lights use PromQL span metrics; Explore opens matching spans.
+    window.open(
+      exploreUrl({
+        kind,
+        query,
+        start,
+        end,
+        spansView: kind === "tracing" ? "spans" : undefined,
+      }),
+      "_blank",
+      "noopener,noreferrer"
+    );
   }
 
   const critical = data?.stages.filter((s) => s.light === "red").length ?? 0;
@@ -634,12 +777,12 @@ export default function PathpointDashboard() {
         <div>
           <h1>Pathpoint · Online Boutique</h1>
           <p className="subtitle">
-            astronomy-demo journey · live Coralogix spans &amp; logs
+            astronomy-demo journey · span metrics lights · spans drill-down
             {data?.dataSource ? ` · ${data.dataSource}` : ""}
             {data?.fetchedAt
               ? ` · updated ${new Date(data.fetchedAt).toLocaleString("en")}`
               : ""}
-            {" · right-click any box to ask Olly"}
+            {" · right-click any box to ask Olly / View Infrastructure"}
           </p>
         </div>
         <div className="counts">
@@ -727,10 +870,17 @@ export default function PathpointDashboard() {
               stage={stage}
               index={i}
               onOpen={() => {
+                selectK8s({ stage: stage.id, label: STAGE_LABELS[stage.id] || stage.name });
                 if (stage.explore) openExplore(stage.explore.kind, stage.explore.query);
               }}
-              onTraces={() => setSelectedStage(stage.id)}
-              onOlly={() => void askOlly({ stage: stage.id })}
+              onTraces={() => {
+                selectK8s({ stage: stage.id, label: STAGE_LABELS[stage.id] || stage.name });
+                setSelectedStage(stage.id);
+              }}
+              onOlly={() => {
+                selectK8s({ stage: stage.id, label: STAGE_LABELS[stage.id] || stage.name });
+                void askOlly({ stage: stage.id });
+              }}
               onContextMenu={openContextMenu}
             />
           ))}
@@ -752,6 +902,7 @@ export default function PathpointDashboard() {
                   metric: step.metric,
                   light: step.light,
                   stageId: stage.id,
+                  stepId: step.id,
                   exploreKind: step.explore?.kind,
                   exploreQuery: step.explore?.query,
                   source: sourceForStep(step.id),
@@ -764,10 +915,16 @@ export default function PathpointDashboard() {
                     data-howto={step.howto || step.metric}
                     style={{ borderColor: LIGHT[step.light] }}
                     onClick={() => {
+                      selectK8s({
+                        stage: stage.id,
+                        step: step.id,
+                        label: `${STAGE_LABELS[stage.id] || stage.name} · ${step.name}`,
+                        scroll: true,
+                      });
                       if (step.explore) openExplore(step.explore.kind, step.explore.query);
                     }}
                     onContextMenu={(e) => openContextMenu(e, box)}
-                    title="Left-click: open in Coralogix · Right-click: ask Olly"
+                    title="Left-click: Coralogix · Right-click: View Infrastructure / ask Olly"
                   >
                     <span className="step-num">{si + 1}</span>
                     <span className="step-body">
@@ -792,6 +949,7 @@ export default function PathpointDashboard() {
               label: m.label,
               metric: `${m.value}${m.hint ? ` · ${m.hint}` : ""}`,
               light: m.light,
+              stageId: stageFromBizId(m.id),
               exploreKind: m.explore?.kind,
               exploreQuery: m.explore?.query,
               source: sourceForBiz(m.id),
@@ -804,10 +962,14 @@ export default function PathpointDashboard() {
                 data-howto={m.howto || m.hint || m.label}
                 style={{ borderColor: LIGHT[m.light] }}
                 onClick={() => {
+                  const stage = stageFromBizId(m.id);
+                  if (stage) {
+                    selectK8s({ stage, label: m.label, scroll: true });
+                  }
                   if (m.explore) openExplore(m.explore.kind, m.explore.query);
                 }}
                 onContextMenu={(e) => openContextMenu(e, box)}
-                title="Left-click: open in Coralogix · Right-click: ask Olly"
+                title="Left-click: Kubernetes + Coralogix · Right-click: ask Olly"
               >
                 <span className="muted">{m.label}</span>
                 <strong style={{ color: LIGHT[m.light] }}>{m.value}</strong>
@@ -841,6 +1003,19 @@ export default function PathpointDashboard() {
                   type="button"
                   className="touch-row"
                   onClick={() => {
+                    const stage =
+                      /checkout/i.test(tp.name)
+                        ? "checkout"
+                        : /charge|payment/i.test(tp.name)
+                          ? "payment"
+                          : /cart|redis/i.test(tp.name)
+                            ? "cart"
+                            : /catalog|product|browse/i.test(tp.name)
+                              ? "browse"
+                              : /ship|email|empty|fulfill/i.test(tp.name)
+                                ? "fulfill"
+                                : undefined;
+                    if (stage) selectK8s({ stage, label: tp.name, scroll: true });
                     if (tp.explore) openExplore(tp.explore.kind, tp.explore.query);
                   }}
                   onContextMenu={(e) => openContextMenu(e, box)}
@@ -1185,6 +1360,154 @@ export default function PathpointDashboard() {
         </div>
       </section>
 
+      <section className="k8s-section" ref={k8sSectionRef}>
+        <div className="section-label">
+          KUBERNETES · INFRA EXPLORER
+          {k8s?.selection?.label ? ` · ${k8s.selection.label}` : ""}
+          {k8sLoading ? " (loading…)" : ""}
+        </div>
+        <div className="panel k8s-panel">
+          {k8sError ? <p className="error pad">{k8sError}</p> : null}
+          {!k8s && !k8sLoading && !k8sError ? (
+            <p className="muted pad">Click any stage, step, or KPI box to populate cluster context.</p>
+          ) : null}
+          {k8s ? (
+            <>
+            <div className="k8s-grid">
+              <div className="k8s-field">
+                <span className="k8s-field-label">Cluster</span>
+                <a href={k8s.cluster.url} target="_blank" rel="noreferrer" className="k8s-link">
+                  {k8s.cluster.name}
+                </a>
+              </div>
+              <div className="k8s-field">
+                <span className="k8s-field-label">Namespace</span>
+                <a href={k8s.namespace.url} target="_blank" rel="noreferrer" className="k8s-link">
+                  {k8s.namespace.name}
+                </a>
+              </div>
+              <div className="k8s-field k8s-field-wide">
+                <span className="k8s-field-label">Deployment</span>
+                <div className="k8s-chips">
+                  {k8s.deployments.map((d) => (
+                    <a key={d.name} href={d.url} target="_blank" rel="noreferrer" className="k8s-chip">
+                      {d.name}
+                    </a>
+                  ))}
+                  {!k8s.deployments.length ? <span className="muted">—</span> : null}
+                </div>
+              </div>
+              <div className="k8s-field k8s-field-wide">
+                <span className="k8s-field-label">Node</span>
+                <div className="k8s-chips">
+                  {k8s.nodes.map((n) => (
+                    <a key={n.name} href={n.url} target="_blank" rel="noreferrer" className="k8s-chip">
+                      {n.name}
+                    </a>
+                  ))}
+                  {!k8s.nodes.length ? <span className="muted">—</span> : null}
+                </div>
+              </div>
+              <div className="k8s-field k8s-field-full">
+                <span className="k8s-field-label">Pod</span>
+                <div className="k8s-pod-list">
+                  {k8s.pods.map((p) => (
+                    <div key={p.name} className="k8s-pod-row">
+                      <a href={p.url} target="_blank" rel="noreferrer" className="k8s-link">
+                        {p.name}
+                      </a>
+                      <span className="muted">
+                        {p.deployment}
+                        {p.node ? ` · ${p.node}` : ""}
+                      </span>
+                    </div>
+                  ))}
+                  {!k8s.pods.length ? (
+                    <span className="muted">No matching pods in astronomy-demo</span>
+                  ) : null}
+                </div>
+              </div>
+            </div>
+
+            {k8s.usage ? (
+              <div className="k8s-metrics">
+                <div className="k8s-metric">
+                  <span className="k8s-field-label">CPU</span>
+                  <strong className="k8s-metric-value">{k8s.usage.cpu}</strong>
+                </div>
+                <div className="k8s-metric">
+                  <span className="k8s-field-label">CPU request</span>
+                  <strong className="k8s-metric-value">{k8s.usage.cpuRequest}</strong>
+                </div>
+                <div className="k8s-metric">
+                  <span className="k8s-field-label">Memory</span>
+                  <strong className="k8s-metric-value">{k8s.usage.memory}</strong>
+                </div>
+                <div className="k8s-metric">
+                  <span className="k8s-field-label">Memory request</span>
+                  <strong className="k8s-metric-value">{k8s.usage.memoryRequest}</strong>
+                </div>
+                <div className="k8s-metric k8s-metric-trend">
+                  <span className="k8s-field-label">Memory trend</span>
+                  <div className="k8s-trend-row">
+                    <MemorySparkline points={k8s.usage.memoryTrend.points} />
+                    <span
+                      className={
+                        (k8s.usage.memoryTrend.changePct ?? 0) > 2
+                          ? "k8s-trend-up"
+                          : (k8s.usage.memoryTrend.changePct ?? 0) < -2
+                            ? "k8s-trend-down"
+                            : "muted"
+                      }
+                    >
+                      {k8s.usage.memoryTrend.label}
+                    </span>
+                  </div>
+                </div>
+                <div className="k8s-metric k8s-metric-containers">
+                  <span className="k8s-field-label">
+                    Containers
+                    {k8s.usage.containerCount
+                      ? ` · ${k8s.usage.containerCount}`
+                      : ""}
+                  </span>
+                  <div className="k8s-chips">
+                    {k8s.usage.containers.map((c) => (
+                      <span
+                        key={c.name}
+                        className={`k8s-chip k8s-chip-static ${c.ready ? "k8s-chip-ready" : "k8s-chip-not-ready"}`}
+                        title={
+                          c.restarts != null
+                            ? `${c.name} · ready=${c.ready} · restarts=${c.restarts}`
+                            : `${c.name} · ready=${c.ready}`
+                        }
+                      >
+                        <span
+                          className="k8s-container-dot"
+                          style={{ background: c.ready ? "#3FA266" : "#CF2D56" }}
+                        />
+                        {c.name}
+                        {c.restarts != null && c.restarts > 0
+                          ? ` · ${c.restarts}↻`
+                          : ""}
+                      </span>
+                    ))}
+                    {!k8s.usage.containers.length ? (
+                      <span className="muted">—</span>
+                    ) : null}
+                  </div>
+                </div>
+              </div>
+            ) : null}
+            </>
+          ) : null}
+          <p className="muted k8s-hint">
+            Links open Coralogix Infrastructure Explorer. Click a Pathpoint box to refine Cluster →
+            Node → Pod → Namespace → Deployment.
+          </p>
+        </div>
+      </section>
+
       <section className="olly-section" ref={ollySectionRef}>
         <div className="section-label">
           OLLY · CORALOGIX AI
@@ -1469,6 +1792,16 @@ export default function PathpointDashboard() {
           onClick={(e) => e.stopPropagation()}
         >
           <div className="ctx-menu-label">{ctxMenu.box.label}</div>
+          {ctxMenu.box.stageId || ctxMenu.box.kind === "stage" || ctxMenu.box.kind === "step" ? (
+            <button
+              type="button"
+              className="ctx-menu-item ctx-menu-item-primary"
+              role="menuitem"
+              onClick={() => viewInfrastructure(ctxMenu.box)}
+            >
+              View Infrastructure
+            </button>
+          ) : null}
           {ctxMenu.box.source ? (
             <>
               <button

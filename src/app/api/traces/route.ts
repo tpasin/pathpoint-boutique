@@ -7,9 +7,8 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
 /**
- * 2–3 queries per stage so recent traffic from each relevant service/op family
- * shows up — a single hot span cannot crowd out the rest.
- * Note: DataPrime `~` is unanchored; avoid `^` which may not match.
+ * Journey lights use span metrics; this endpoint still queries raw spans
+ * so clicking a stage shows evidence. Explore links open spans view.
  */
 const STAGE_QUERY_SETS: Record<string, string[]> = {
   browse: [
@@ -188,6 +187,7 @@ export async function GET(req: NextRequest) {
         query: exploreQuery,
         start,
         end,
+        spansView: "spans",
       }),
       traces,
     });

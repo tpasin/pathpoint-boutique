@@ -69,12 +69,31 @@ export function sessionReplayHubUrl(opts?: { start?: string; end?: string }): st
   return `${base}/rum/sessions?${params.toString()}`;
 }
 
+/** Deep-link into Coralogix Infrastructure Explorer (Kubernetes catalog). */
+export function infraExplorerUrl(opts: {
+  menuItem?: "All" | "Clusters" | "Nodes" | "Pods" | "Namespaces" | "Deployments";
+  name?: string;
+  search?: string;
+}): string {
+  const base = coralogixUiBaseClient();
+  const menuItem = opts.menuItem || "All";
+  const params = new URLSearchParams({
+    menu: "Kubernetes",
+    menuItem,
+  });
+  const search = opts.search || (opts.name ? `Name: "${opts.name}"` : "");
+  if (search) params.set("search", search);
+  return `${base}/#/infrastructure/monitoring/catalog?${params.toString()}`;
+}
+
 export function exploreUrl(opts: {
   kind: "logs" | "tracing";
   query?: string;
   start: string;
   end: string;
   traceId?: string;
+  /** Prefer list of spans (default) vs traces grouping — Pomelo-style drill-down. */
+  spansView?: "spans" | "traces";
 }): string {
   const base = coralogixUiBaseClient();
   const from = new Date(opts.start).getTime();
@@ -97,10 +116,17 @@ export function exploreUrl(opts: {
   let query = opts.query || "";
   if (opts.kind === "tracing") {
     query = query.replace(/\bsource\s+frequentsearch\/spans\b/gi, "source spans");
+    if (query && !/^\s*source\s+/i.test(query)) {
+      query = `source spans | ${query}`;
+    }
   } else {
     query = query.replace(/\bsource\s+frequentsearch\/logs\b/gi, "source logs");
+    if (query && !/^\s*source\s+/i.test(query)) {
+      query = `source logs | ${query}`;
+    }
   }
 
+  const spansView = opts.spansView || (opts.kind === "tracing" ? "spans" : "traces");
   const params = new URLSearchParams({
     queryType: "dataprime",
     dataset,
@@ -108,8 +134,8 @@ export function exploreUrl(opts: {
     to: String(to),
   });
   if (opts.kind === "tracing") {
-    params.set("page", "traces");
-    params.set("spansView", "traces");
+    params.set("page", spansView === "traces" ? "traces" : "spans");
+    params.set("spansView", spansView);
   }
   if (query) {
     params.set("query", query);
